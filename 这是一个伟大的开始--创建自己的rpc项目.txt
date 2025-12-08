@@ -1,0 +1,115 @@
+12-4:
+依赖应该与 pom.xml 的 properties 同一个等级
+
+为什么要叫 entity？因为这两个类是用来承载数据的实体对象
+
+今日的任务：只要能看到客户端发出的 RpcRequest 对象在服务端控制台打印出来就算成功
+具体实现需要分三步走
+1. 让 rpc-core 认识 rpc-common
+2. 编写服务端：在 rpc-core 里写一个能“听懂” Java 对象的 Netty 服务端。
+3. 编写客户端：在 rpc-core (或者 test-client) 里写一个能“发送” Java 对象的 Netty 客户端。
+
+第一步：打通模块依赖 (Module Dependencies)
+你的 RpcRequest 在 rpc-common 模块里，而你的 Netty 代码在 rpc-core 里。 所以，你需要告诉 Maven：rpc-core 依赖 rpc-common。
+
+第二步：编写服务端 (RpcServer)
+我们在 rpc-core 模块下，新建包 com.github.spock12138.rpc.core.server，然后新建类 RpcServer。
+
+总结 ---- 按照你的一步步操作，我已经实现了客户端和服务器端的通信。今天关于搭建 rpc 项目，包括创建项目框架，实现基础的客户端发出的对象，服务器端可以成功打印出来。创建的entity类包括 RpcRequest 与 rpcResponse，core 中创建了client 与 server 包，创建了 客户类与服务器类。
+
+
+一、 服务端代码翻译 (RpcServer)
+把服务端想象成一个繁忙的银行网点。
+1. 两个线程组 (EventLoopGroup)
+bossGroup（大堂经理）： 他只做一件事——站在门口**“迎宾”**（处理 accept 事件）。客人进门了，他就把客人领给柜台。
+workerGroup（柜台职员）： 他们负责**“干活”**（处理 read/write 事件）。比如存钱、取钱、打印流水。
+为什么分两个？ 为了效率。大堂经理不干杂活，专心迎宾，这样门口就不会排长队。
+2. 启动助手 (ServerBootstrap)
+这是一个配置单。因为 Netty 的组件太多了，用这个助手类来把所有的组件组装起来。
+3. 流水线 (Pipeline & Handler) —— 全场核心
+想象一条传送带。网络传过来的原本是 010101 这种字节流（包裹）。
+ObjectDecoder（拆包员）： 把包裹拆开，把字节流变成一个 Java 对象（RpcRequest）。
+SimpleChannelInboundHandler（业务员）： 拿到已经是对象的 RpcRequest，看里面的内容（打印日志）。
+顺序至关重要： 必须先拆包（Decoder），业务员才能看懂。如果顺序反了，业务员拿到的就是一堆乱码。
+
+二、 客户端代码翻译 (RpcClient)  --  寄快递
+1. 启动与连接
+客户端只需要一个线程组（因为不需要分工），负责拨打电话连接服务器。
+2. 发送数据 (writeAndFlush)
+Write（写）： 把信放到邮箱里。
+Flush（冲刷）： 举起邮箱的小旗子，告诉邮递员“赶紧把信拿走发出去”。（如果不 Flush，数据可能会积压在本地缓冲发不出去）。
+经过 Pipeline： 你的 RpcRequest 对象，会先经过 ObjectEncoder（打包员），被转化成字节流，然后通过网线发出去。
+
+三、 总结：Netty 的“三板斧”
+以后不管怎么改代码，核心逻辑永远是这三步：
+老板与工人（Group）： 负责线程调度。
+传送带（Pipeline）： 数据进来该怎么处理？（解码 -> 业务 -> 编码）。
+大喇叭（ChannelHandler）： 具体的业务逻辑全写在这里（比如今天的打印日志，明天的调用服务）。
+
+
+12-5:
+遇到这个错误  Cannot resolve symbol 'HelloService'
+test-server 模块根本不知道 rpc-api 模块的存在
+虽然你在同一个项目里写了这两个模块，但在 Maven 的世界里，如果不在 pom.xml 里明确声明依赖，它们就是两个陌生人。
+你需要去 test-server 模块的 pom.xml 里“介绍”它们认识。
+解决方法
+请打开 test-server 模块下的 pom.xml 文件，添加如下依赖代码
+
+注意导包 (Imports) 鼠标放在红字上，按 Alt + Enter（或者 Option + Enter），选择 Import Class。
+
+今天的总结复盘
+一、 今天你到底学会了什么？（核心复盘）
+1. 架构观：Maven 的“模块社交学”
+遇到的坑： 你在写 HelloServiceImpl 时报错找不到 HelloService，这是新手最容易卡壳的地方。
+学到的点： Maven 模块隔离。
+默认情况下，test-server 根本不认识 rpc-api。你必须在 pom.xml 里显式添加 <dependency>，就像给两个陌生人发名片介绍认识一样。这是大型 Java 项目的标准管理方式。
+2. 通信观：Netty 的“流水线思维”
+代码体现： 你在 RpcClient 和 RpcServer 里写的 pipeline.addLast(...)。
+学到的点： 责任链模式。
+数据在网络传输时是 0/1 比特流。
+解码器 (Decoder)：负责把“比特流”变成“Java 对象”（拆快递）。
+业务 Handler：负责处理对象（看信件内容、回信）。
+编码器 (Encoder)：负责把“Java 对象”变回“比特流”（打包发走）。
+这种分工让代码非常清晰，以后你想换加密方式，只改编解码器就行，不用动业务逻辑。
+3. 核心技：反射 (Reflection) 的“上帝视角”
+代码体现： Server 端那几行 method.invoke(...)。
+学到的点： 动态代理的基石。
+普通的 Java 调用是写死的（service.sayHello()）。
+RPC 的调用是动态的：“给我一个字符串 'sayHello'，我就能让它跑起来”。这就是框架和业务代码的区别——框架可以在不知道具体写了什么方法的情况下，去驱动业务代码运行。
+二、 你的 RPC 运行全流程（脑内动画）
+闭上眼睛，回想一下你刚才启动的那两个黑窗口，它们背后发生了这件事：
+启动 (Server Start)： TestServer 启动，把一张“菜单”（HelloServiceImpl）交给了 RpcServer 保管（注册表 Map）。
+打包 (Client Send)： RpcClient 启动，把你写的“我想调用 sayHello”这句话，封装进 RpcRequest 盒子，贴上快递单，通过 Netty 发出去。
+解析与执行 (Server Work)：
+Server 收到盒子，打开一看：“哦，要找 HelloService 的 sayHello 方法”。
+Server 去查注册表，找到对应的对象。
+Server 用 反射 手段，强行让那个对象执行了方法。
+回信 (Response)： Server 把执行结果 “你好, Spock!” 装进 RpcResponse 盒子，原路发回。
+收货 (Client Receive)： Client 收到盒子，拆开，打印在控制台上。
+
+关于反射的总结
+普通调用： obj.method()。像是按按钮。按钮是固定的，按这个按钮只能亮这盏灯。
+反射调用： method.invoke(obj)。像是声控智能家居。你喊“开灯”，它解析你的指令去开灯；你喊“放音乐”，它解析指令去放音乐。RPC Server 就是那个听指令的智能音箱。
+
+
+
+12-8:
+今天的任务安排 ---- 把 Client 端的代码，用 动态代理 (Dynamic Proxy) 包装起来。让它看起来像在调用本地方法一样简单：helloService.sayHello("Spock")。
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
