@@ -96,7 +96,76 @@ Server 用 反射 手段，强行让那个对象执行了方法。
 12-8:
 今天的任务安排 ---- 把 Client 端的代码，用 动态代理 (Dynamic Proxy) 包装起来。让它看起来像在调用本地方法一样简单：helloService.sayHello("Spock")。
 
+第一个遇到的就是梯子问题，设置在 IDEA 中设置 Git 代理
+git config --global http.proxy http://127.0.0.1:7890
+git config --global https.proxy http://127.0.0.1:7890
+重试 Push：如果你以后关了代理软件，Git 可能会报错连不上。到时候在 Terminal 输入 git config --global --unset http.proxy 和 git config --global --unset https.proxy 取消设置即可。
 
+
+核心概念：什么是“代理 (Proxy)”？
+普通调用： 你直接给明星（Server）打电话。但明星在另一个城市（另一台电脑），你够不着。
+
+代理模式： 你找明星的经纪人（Proxy）。
+经纪人手里有一张和明星一模一样的名片（接口 Interface）。
+你对经纪人说：“我要找明星唱歌（调用 sayHello）”。
+经纪人说：“好，我帮你传达。”
+经纪人默默地把你的请求写在纸上（封装 RpcRequest），寄给明星，等明星回信，然后再把结果告诉你。
+你今天要写的 ClientProxy 就是这个经纪人。
+
+第一步：改造 RpcClient (让它变成单纯的送信员)
+昨天你的 RpcClient 里，RpcRequest 是硬编码写死的（Spock, sayHello）。 我们要把它改造成：给它什么信，它就送什么信。
+修改 rpc-core 下的 RpcClient.java
+
+第二步：创建动态代理类 (ClientProxy) —— 今天的核心
+在 rpc-core 模块下，新建包 com.github.spock12138.rpc.core.proxy，新建类 ClientProxy
+
+第三步：见证“本地调用”的时刻
+我们去 test-client 模块，修改测试类 TestClient (或者你之前的 main 方法)。
+
+
+你的“今日任务”清单
+改造 RpcClient：把 request 改成参数传入。
+新建 ClientProxy：复制上面的代码，理解 invoke 方法是怎么偷天换日的。
+运行测试：
+先启动 TestServer。
+再启动新的 TestClient。
+预期结果： 你虽然在 Client 端代码里只写了 helloService.sayHello(...)，但 Server 端应该能收到请求，并且 Client 端控制台会打印出 Server 发回来的响应。
+
+今天学习包括的知识点 JDK 动态代理 + Netty 异步调用 + 反射
+
+三、 完整的数据流向动画
+当你执行 helloService.sayHello("Spock-Proxy") 时，数据是这样流动的：
+TestClient 发起调用。
+JDK 动态代理 捕获调用，直接跳转到 ClientProxy.invoke()。
+ClientProxy 把 "sayHello" 和 "Spock-Proxy" 两个词，打包进 RpcRequest 对象。
+ClientProxy 把 RpcRequest 对象递给 RpcClient。
+RpcClient 通过 Netty 把对象发给 服务端。
+(服务端处理...)
+RpcClient 的 Handler 收到回信 "你好..."，并打印在控制台上。
+
+明天的主线： 我们要让 TestClient 能真正拿到返回值，而不是去控制台看日志。 这就需要引入 CompletableFuture (异步转同步) 的机制。
+
+
+一、 今日学习复盘：RPC 的“魔法时刻”
+今天我们完成了从 “硬编码调用” 到 “动态代理调用” 的华丽转身。
+1. 核心概念：动态代理 (Dynamic Proxy)
+以前 (Day 1)：你需要手动造 RpcRequest 对象，像填表格一样一个个填（接口名、方法名...），非常麻烦且丑陋。
+现在 (Day 2)：你只需要像调用本地方法一样调用接口 helloService.sayHello("...")。
+原理：
+我们利用 JDK 动态代理 (Proxy.newProxyInstance) 在内存中凭空生成了一个 HelloService 的**“傀儡对象”**。
+这个傀儡没有任何业务逻辑，它的唯一作用就是把你的所有操作**“拦截”**下来，转发给 InvocationHandler（也就是我们写的 ClientProxy）。
+
+2. 代码架构演进
+我们修改了三个核心文件，它们的分工变得更加专业：
+ClientProxy.java (新晋主角 - 经纪人)：
+职责：实现了 InvocationHandler 接口。它是“拦截器”，负责将方法调用（Method Call）转换成数据对象（RpcRequest）。
+关键点：它屏蔽了底层的网络细节，让调用者感觉不到网络的存在。
+RpcClient.java (被改造 - 快递员)：
+变化：从“只送特定包裹”变成了“通用快递员”。
+职责：sendRequest(RpcRequest request)。给它什么请求，它就通过 Netty 发送什么请求。它不再关心业务逻辑。
+TestClient.java (用户)：
+变化：代码变得极度简洁。不再需要手动构建 Request，也不需要直接操作 Netty。
+体验：clientProxy.getProxy(HelloService.class) 这一行代码，就是连接“本地”与“远程”的桥梁。
 
 
 

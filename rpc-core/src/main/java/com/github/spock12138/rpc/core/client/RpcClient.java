@@ -13,7 +13,16 @@ import io.netty.handler.codec.serialization.ObjectEncoder;
 
 public class RpcClient {
 
-    public void sendRequest(String host, int port) {
+    private final String host;
+    private final int port;
+
+    public RpcClient(String host, int port) {
+        this.host = host;
+        this.port = port;
+    }
+
+    // 【修改点】这个方法现在接收一个 RpcRequest 参数
+    public Object sendRequest(RpcRequest request) {
         EventLoopGroup group = new NioEventLoopGroup();
         try {
             Bootstrap bootstrap = new Bootstrap();
@@ -23,41 +32,20 @@ public class RpcClient {
                         @Override
                         protected void initChannel(SocketChannel ch) {
                             ChannelPipeline pipeline = ch.pipeline();
-                            // 添加编解码器 (要和服务端对应)
                             pipeline.addLast(new ObjectDecoder(ClassResolvers.cacheDisabled(null)));
                             pipeline.addLast(new ObjectEncoder());
-
-                            // 替换掉原来的 ChannelInboundHandlerAdapter
+                            // 简单的 Handler，只负责发和收
                             pipeline.addLast(new SimpleChannelInboundHandler<RpcResponse>() {
                                 @Override
-                                public void channelActive(ChannelHandlerContext ctx) throws Exception {
-                                    // 连接建立成功后，发送请求
-                                    // 【注意】这里不再是发测试数据，而是发真正符合 HelloService 接口定义的请求
-                                    RpcRequest request = RpcRequest.builder()
-                                            .interfaceName("com.github.spock12138.rpc.api.HelloService")
-                                            .methodName("sayHello")
-                                            .parameters(new Object[]{"Spock"})
-                                            .paramTypes(new Class[]{String.class})
-                                            .build();
-
+                                public void channelActive(ChannelHandlerContext ctx) {
+                                    // 【核心】发送传入的 request，而不是自己造
                                     ctx.writeAndFlush(request);
-                                    System.out.println("客户端已发送消息！");
                                 }
 
                                 @Override
-                                protected void channelRead0(ChannelHandlerContext ctx, RpcResponse msg) throws Exception {
-                                    // 【新增】这里就是专门用来接收服务端回信的地方
-                                    System.out.println("====== 收到服务端响应 ======");
-                                    System.out.println("状态码: " + msg.getCode());
-                                    System.out.println("结果: " + msg.getData());
-                                    System.out.println("==========================");
-                                }
-
-                                @Override
-                                public void exceptionCaught(ChannelHandlerContext ctx, Throwable cause) {
-                                    // 最好加上异常处理，万一断网了能知道
-                                    cause.printStackTrace();
-                                    ctx.close();
+                                protected void channelRead0(ChannelHandlerContext ctx, RpcResponse msg) {
+                                    // 暂时还是打印，后面我们会把这个结果 return 出去
+                                    System.out.println("收到响应: " + msg.getData());
                                 }
                             });
                         }
@@ -65,15 +53,16 @@ public class RpcClient {
 
             ChannelFuture future = bootstrap.connect(host, port).sync();
             future.channel().closeFuture().sync();
+
+            // TODO: 这里目前返回 null，因为 Netty 是异步的，拿到返回值需要一点高级技巧（CompletableFuture）
+            // 我们明天再解决“怎么拿到返回值”的问题，今天先保证“能发出去”
+            return null;
+
         } catch (InterruptedException e) {
             e.printStackTrace();
+            return null;
         } finally {
             group.shutdownGracefully();
         }
-    }
-
-    // 临时 main 方法
-    public static void main(String[] args) {
-        new RpcClient().sendRequest("127.0.0.1", 9000);
     }
 }
