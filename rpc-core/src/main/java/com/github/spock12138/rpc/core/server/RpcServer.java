@@ -50,6 +50,10 @@ public class RpcServer {
                                 protected void channelRead0(ChannelHandlerContext ctx, RpcRequest msg) {
                                     // 【核心修改】这里不再只是打印，而是去执行！
                                     RpcResponse<Object> response = new RpcResponse<>();
+
+                                    // 【关键一步】把请求的 ID 原封不动地塞回响应里
+                                    response.setRequestId(msg.getRequestId());
+
                                     try {
                                         // 1. 从注册表中拿到实现类对象
                                         Object serviceImpl = serviceMap.get(msg.getInterfaceName());
@@ -66,6 +70,8 @@ public class RpcServer {
                                         // 4. 封装成功结果
                                         response.setCode(200);
                                         response.setData(result);
+
+                                        response.setData(result); // 设置结果
 
                                     } catch (Exception e) {
                                         e.printStackTrace();

@@ -16,8 +16,9 @@ import java.io.Serializable;
 @NoArgsConstructor
 @AllArgsConstructor
 public class RpcRequest implements Serializable {
-    private String interfaceName; // 接口名 (比如: HelloService)
-    private String methodName;    // 方法名 (比如: sayHello)
-    private Object[] parameters;  // 参数列表
-    private Class<?>[] paramTypes;// 参数类型
+    private String requestId; // 【新增】唯一的请求 ID
+    private String interfaceName;
+    private String methodName;
+    private Object[] parameters;
+    private Class<?>[] paramTypes;
 }

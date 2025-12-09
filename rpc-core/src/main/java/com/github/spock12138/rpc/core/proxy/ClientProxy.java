@@ -32,21 +32,17 @@ public class ClientProxy implements InvocationHandler {
     // 【核心逻辑】当用户调用 helloService.sayHello() 时，会被这里拦截！
     @Override
     public Object invoke(Object proxy, Method method, Object[] args) throws Throwable {
-        // 1. 拦截方法调用，构建 RpcRequest 对象
         RpcRequest request = RpcRequest.builder()
-                .interfaceName(method.getDeclaringClass().getName()) // 接口名
-                .methodName(method.getName())                        // 方法名
-                .parameters(args)                                    // 参数
-                .paramTypes(method.getParameterTypes())              // 参数类型
+                .interfaceName(method.getDeclaringClass().getName())
+                .methodName(method.getName())
+                .parameters(args)
+                .paramTypes(method.getParameterTypes())
                 .build();
 
-        // 2. 创建 RpcClient，把信发出去
         RpcClient client = new RpcClient(host, port);
 
-        // 3. 发送！
-        client.sendRequest(request);
-
-        // 目前先返回 null，因为 RpcClient 还没法同步返回结果
-        return null;
+        // 【修改点】直接返回 sendRequest 的结果！
+        // 昨天这里是 return null，今天它有值了！
+        return client.sendRequest(request);
     }
 }
