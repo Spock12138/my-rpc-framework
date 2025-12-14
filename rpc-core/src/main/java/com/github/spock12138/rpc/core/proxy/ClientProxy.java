@@ -7,14 +7,17 @@ import java.lang.reflect.InvocationHandler;
 import java.lang.reflect.Method;
 import java.lang.reflect.Proxy;
 
+import com.github.spock12138.rpc.core.registry.ServiceDiscovery;
+import com.github.spock12138.rpc.core.registry.ZkServiceDiscovery;
+import java.net.InetSocketAddress;
+
 public class ClientProxy implements InvocationHandler {
 
-    private final String host;
-    private final int port;
+    // 【修改】不再存死 IP，而是存“发现服务的能力”
+    private final ServiceDiscovery serviceDiscovery;
 
-    public ClientProxy(String host, int port) {
-        this.host = host;
-        this.port = port;
+    public ClientProxy() {
+        this.serviceDiscovery = new ZkServiceDiscovery();
     }
 
     //这是对外提供的方法，用来生成代理对象
@@ -29,9 +32,9 @@ public class ClientProxy implements InvocationHandler {
         );
     }
 
-    // 【核心逻辑】当用户调用 helloService.sayHello() 时，会被这里拦截！
     @Override
     public Object invoke(Object proxy, Method method, Object[] args) throws Throwable {
+        // 1. 构建请求 (不变)
         RpcRequest request = RpcRequest.builder()
                 .interfaceName(method.getDeclaringClass().getName())
                 .methodName(method.getName())
@@ -39,10 +42,15 @@ public class ClientProxy implements InvocationHandler {
                 .paramTypes(method.getParameterTypes())
                 .build();
 
-        RpcClient client = new RpcClient(host, port);
+        // 2. 【核心修改】去 Zookeeper 查：这个接口也就谁在做？
+        String serviceName = method.getDeclaringClass().getName();
+        InetSocketAddress address = serviceDiscovery.lookupService(serviceName);
 
-        // 【修改点】直接返回 sendRequest 的结果！
-        // 昨天这里是 return null，今天它有值了！
+        // 3. 【核心修改】拿到动态地址后，再连接服务器
+        // 注意：address.getHostString() 获取 IP
+        RpcClient client = new RpcClient(address.getHostString(), address.getPort());
+
+        // 4. 发送请求 (不变)
         return client.sendRequest(request);
     }
 }

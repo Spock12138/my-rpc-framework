@@ -214,6 +214,224 @@ private static final Map<String, CompletableFuture<RpcResponse>> PENDING_REQUEST
 
 今日任务： 按顺序执行这 4 步（Common -> Server -> Client -> Proxy）。 一旦 TestClient 能打印出结果，立刻 Commit + Push，然后结束今天的战斗！
 
+今日复盘 (Summary)
+今天我们解决的核心痛点是：Netty 发送是异步的（发完就走），但业务调用是同步的（必须等结果）。
+我们引入了三个关键道具来解决这个问题：
+唯一标识 (Request ID)：给每个请求贴上快递单号，确保回来的包裹能对上号。
+全局信箱 (Map)：用来暂存那些“发出去但还没回来”的请求。
+同步锁 (CompletableFuture)：让主线程在门口死等，直到结果回来。
+
+你的“作弊条” (Cheat Sheet for Interview)
+如果面试官问：“你的 RPC 怎么处理异步返回值的？” 标准答案：
+“我使用了 CompletableFuture 结合 ConcurrentHashMap。
+发送请求前，生成一个 UUID，创建一个 CompletableFuture 放入 Map 中，Key 是 UUID。
+线程调用 future.get() 阻塞等待。
+当 Netty 收到响应时，根据响应里的 UUID 从 Map 中取出 Future，调用 future.complete(response)。
+这样主线程就被唤醒并拿到结果了。”
+
+
+
+12-11:
+开始今天的手写 rpc 项目，前几天完成了 异步转同步和动态代理。
+// 这里的 IP 和端口是写死的！万一服务器换了 IP，或者我也想搞个集群，这就废了。
+new ClientProxy("127.0.0.1", 9000);
+今天的解决方案 —— 引入 Zookeeper： 我们要把 Zookeeper 当作一个**“房屋中介”**。
+Server (房东)：启动时，把自己的地址（127.0.0.1:9000）贴到中介的墙上。
+Client (租客)：启动时，不去直接找房东，而是先去中介墙上查：“HelloService 在哪里？”，拿到地址后再去连接
+待会儿的动作：
+我们需要引入一个新工具：Curator（它是 Java 操作 Zookeeper 的客户端库，就像 Jedis 之于 Redis）。
+你需要在这个电脑上（或者 Docker 里）把 Zookeeper 跑起来。
+
+
+今天我们只做一件事：让 Server 启动时，自动把自己的地址（IP:Port）写到 Zookeeper 上去。 这就是所谓的“服务注册”。
+我们分两步走：定义接口 -> 实现 Zookeeper 逻辑。
+
+第一步：定义注册中心接口 (ServiceRegistry)
+为了以后能换成 Nacos 或 Redis，我们先定义一个标准接口。
+在 rpc-core 模块下，新建包：com.github.spock12138.rpc.core.registry。
+新建接口 ServiceRegistry：
+
+第二步：实现 Zookeeper 注册逻辑 (ZkServiceRegistry)
+这是今天的核心代码。我们要利用 Curator 客户端连接 ZK，并创建一个临时节点。
+核心逻辑预告（注释驱动）：
+连接 ZK：设置重试策略（连不上重试 3 次），启动客户端。
+生成路径：比如 /my-rpc/com.xxx.HelloService/127.0.0.1:9000。
+创建节点：必须是 EPHEMERAL (临时节点)。这样万一服务器挂了（断开连接），ZK 会自动把这个节点删掉，防止客户端调用到死掉的服务。
+在同一个包下新建类 ZkServiceRegistry：
+
+
+第三步：修改 RpcServer (让它启动时去注册)
+最后一步，我们要让 RpcServer 启动的时候调用上面写好的代码。
+修改 rpc-core 下的 RpcServer.java：
+在类里增加一个成员变量 private final ServiceRegistry serviceRegistry;。
+在构造函数里初始化它。
+在 register 方法里，除了要把服务放进本地 Map，还要上报给 Zookeeper。
+
+既然服务端已经把房子（地址）挂在 Zookeeper（中介）那了，现在我们要去改造客户端，让客户端去中介那查地址，而不是写死 127.0.0.1
+要开始写 Client 端的“服务发现”逻辑了！
+
+
+先总结刚刚的操作
+新建接口 ServiceRegistry，实现 Zookeeper 注册逻辑 (ZkServiceRegistry)，修改 RpcServer (让它启动时去注册)
+一、 宏观逻辑：为什么要搞这么复杂？
+之前的状态（没有 Zookeeper）：
+Server：默默地在 9000 端口启动，谁也不告诉。
+Client：必须靠猜（或者写死代码）127.0.0.1:9000 才能找到 Server。
+痛点：Server 换个 IP，Client 就瞎了。
+现在的状态（有了 Zookeeper）：
+Zookeeper 就是一个**“房产中介”**（或者公告栏）。
+动作 1： Server 启动时，主动跑去中介那里登记：“我是 HelloService，我的房源地址是 127.0.0.1:9000”。
+动作 2（这就是刚才代码做的事）： 中介在墙上贴了一张条子（创建了一个节点）。
+二、 微观拆解：刚才那三个文件在干嘛？
+你刚才修改了三个文件，它们就像是一个**“分工明确的小团队”**。
+
+1. ServiceRegistry.java (接口) —— 定规矩的
+角色：它是**“标准制定者”**。
+逻辑：它说：“不管你是用 Zookeeper、Nacos 还是 Redis 做中介，反正你必须得能干这件事——注册（register）”。
+意义：为了以后你想换 Nacos 时，不需要改动核心业务代码，只需要换个实现类就行（面向接口编程）。
+2. ZkServiceRegistry.java (实现类) —— 真正干活的
+角色：它是**“Zookeeper 办事专员”**。
+逻辑：
+构造函数：它负责给 Zookeeper 打电话（建立连接），还要处理断线重连（RetryPolicy）。
+register 方法：它负责把 Server 的信息写成 Zookeeper 能看懂的格式。
+路径：/my-rpc/com.xxx.HelloService/127.0.0.1:9000
+类型：临时节点 (Ephemeral)。这非常关键！
+为什么？ 如果 Server 挂了（断气了），它肯定没法通知 Zookeeper 删数据。但因为是临时节点，Zookeeper 发现连接断了，就会自动撕掉这张房源条子。这样 Client 就不会再去连一个死掉的服务了。
+3. RpcServer.java (调用者) —— 发号施令的
+角色：它是**“Server 老板”**。
+逻辑：
+以前：它只知道把自己存到本地 Map 里（为了反射调用）。
+现在：它在启动的时候（register 方法里），顺手把自己的地址扔给了办事专员（serviceRegistry），说：“去，把我的地址通过 Zookeeper 广播出去。”
+
+四、 你的决定
+现在你明白了吗？
+我们不是在为了写代码而写代码。
+我们是为了在 Zookeeper 上留下这个节点。
+接下来我们要做的（Client 端），就是去“读取”这个节点
+
+
+Client 接下来的动作很简单：
+进店（连接 ZK）：Client 也得连上 Zookeeper。
+查房（Service Discovery）：Client 问：“我想找 HelloService 的房源”，Zookeeper 返回一个列表（比如 ["127.0.0.1:9000"]）。
+入住（连接 Server）：Client 拿到地址，直接去连 Server。
+我们依然分三步走：定义接口 -> 实现逻辑 -> 改造代理。
+
+第一步：定义发现接口 (ServiceDiscovery)
+和注册一样，我们先定个规矩。
+在 rpc-core 的 com.github.spock12138.rpc.core.registry 包下，新建接口 ServiceDiscovery
+
+第二步：实现 Zookeeper 查房逻辑 (ZkServiceDiscovery)
+这是 Client 端的 ZK 专员。它的核心任务是 getChildren（获取子节点列表）。
+核心逻辑预告：
+路径：/my-rpc/服务名。
+获取列表：调用 client.getChildren().forPath(path)，它会返回该服务下所有可用的地址列表（比如 ["127.0.0.1:9000", "192.168.1.5:9000"]）。
+负载均衡（简版）：今天我们先不做复杂的轮询或随机，直接拿列表里的第一个（get(0)）。明天我们专门讲怎么在这里做负载均衡。
+
+第三步：改造经纪人 (ClientProxy)
+这是最后一步。我们要让 ClientProxy 变聪明。
+以前：它脑子里只记得一个死地址（构造函数传进来的）。
+现在：它手里拿着一本黄页（ServiceDiscovery），每次发请求前，先查一下地址。
+修改 rpc-core 下的 ClientProxy.java：
+把成员变量 host 和 port 删掉。
+换成 ServiceDiscovery。
+在 invoke 方法里，动态查找地址。
+
+
+一、 核心复盘：Client 端到底发生了什么？
+刚才的三步操作，其实就是教会客户端**“查电话本”**的过程。
+1. ServiceDiscovery (接口) —— 定规矩
+之前的你：直接把电话号码（IP:Port）背下来，写在 ClientProxy 里。
+现在的你：意识到脑子记不住那么多号码，决定买一本“电话簿”。
+代码含义：这个接口就是“电话簿”的标准——不管它是纸质的（Zookeeper）还是电子的（Nacos），它必须具备**“查号 (lookup)”**的功能。
+2. ZkServiceDiscovery (实现类) —— 查电话簿的动作
+这是你刚才觉得最复杂的代码。试着别看代码，闭上眼想一下逻辑：
+第一步：翻开电话簿（连接 Zookeeper）。
+第二步：找到“HelloService”那一页（路径 /my-rpc/com.xxx.HelloService）。
+第三步：看上面贴了哪些号码（client.getChildren() 获取子节点列表 ["127.0.0.1:9000"]）。
+第四步：随便挑一个号码抄下来（list.get(0)）。
+
+3. ClientProxy (代理) —— 打电话的人
+这是变化最大的地方。
+以前：
+new RpcClient("127.0.0.1", 9000) -> 直接拨号。
+现在：
+discovery.lookupService("HelloService") -> 先查号。
+拿到 address。
+new RpcClient(address) -> 再拨号。
+
+
+在编程领域，先看懂“我要做什么”（宏观逻辑），再看懂“这块代码负责哪一部分”（代码块逻辑），最后才去纠结“这行代码为什么这么写”（语法细节），是最不容易迷路的方法。
+第一部分：服务端去登记 (ZkServiceRegistry.java)
+这个类的逻辑其实就两块：“连上中介” 和 “贴个条子”。
+📌 代码块 1：建立连接 (构造函数)
+逻辑：就像你去房产中介，得先走进店门，跟工作人员打个招呼。
+关键动作：
+告诉代码 Zookeeper 在哪 (127.0.0.1:2181)。
+设置一个“命名空间” (namespace = "my-rpc")。
+解释：相当于告诉中介：“我不租房，我是来发布‘RPC服务’的”。以后所有的记录都会归档在这个目录下，防止跟别人的数据混了。
+启动客户端 (client.start())。
+📌 代码块 2：注册服务 (register 方法)
+逻辑：这是最核心的一步。你要在墙上贴一张纸条。
+关键动作：
+拼路径：把服务名和地址拼成一个路径字符串。
+比如：/com.xxx.HelloService/127.0.0.1:9000。
+创建节点：告诉 Zookeeper 创建这个路径。
+重点细节：这里设置了**“临时节点” (Ephemeral)**。
+含义：这就像你跟中介说：“如果我电话打不通了（断连了），就把这张纸条撕了，别让人白跑一趟。”这是自动下线的关键。
+
+第二部分：客户端去查号 (ZkServiceDiscovery.java)
+这个类的逻辑也只有两块：“问中介” 和 “挑一个”。
+📌 代码块 1：获取列表 (lookupService 前半部分)
+逻辑：你问中介：“HelloService 这个服务，现在有哪些人提供？”
+关键动作：
+拼父路径：/com.xxx.HelloService。
+查子节点 (client.getChildren())：Zookeeper 会去这个目录下看一眼，返回所有贴在那里的条子。
+返回结果是一个列表 List，比如 ["127.0.0.1:9000", "192.168.1.5:9000"]。
+📌 代码块 2：负载均衡 (lookupService 后半部分)
+逻辑：中介给了你 5 个地址，你得选一个去连。
+关键动作：
+判空：先看看列表是不是空的，要是没人提供服务，直接报错。
+选择：我们现在的代码很简单，直接 list.get(0)，拿第一个。
+未来扩展：明天我们这里会改成“随机选”或者“轮询选”，这就是负载均衡。
+
+第三部分：代理人去拨号 (ClientProxy.java)
+这是把上面连起来的地方。
+📌 代码块 1：拦截与查找 (invoke 方法前半部分)
+逻辑：当你调用 sayHello 时，代理人先把它拦下来。它心里想：“别急着连，我得先去问问地址变了没。”
+关键动作：
+拿到接口名 (HelloService)。
+调用上面的 discovery.lookupService() 方法。
+拿到一个活着的、真实的 IP 地址。
+📌 代码块 2：连接与发送 (invoke 方法后半部分)
+逻辑：拿到真实地址后，剩下的事就和以前一样了。
+关键动作：
+动态连接：用刚才查到的 IP，现场创建一个 RpcClient。
+发送请求：把数据发过去。
+
+总结一下现在的流程
+如果把整个流程拍成一部电影，分镜脚本是这样的：
+服务端启动：ZkServiceRegistry 跑到 Zookeeper 那里，创建了一个临时节点 /HelloService/127.0.0.1:9000。
+客户端调用：你代码里写了 helloService.sayHello()。
+代理拦截：ClientProxy 暂停动作，转身去问 ZkServiceDiscovery。
+发现服务：ZkServiceDiscovery 问 Zookeeper：“HelloService 在哪？”，拿到 127.0.0.1:9000。
+正式连接：ClientProxy 拿着这个地址，建立 Netty 连接，发送数据。
+
+
+1. 今天的成就：   ⭐⭐⭐ 总结
+环境搭建：用 Docker 一行命令跑起了 Zookeeper，从此不再怕环境配置。
+核心逻辑：
+服务端：学会了“贴小广告”（ZkServiceRegistry），Server 启动自动上报地址。
+客户端：学会了“查电话本”（ZkServiceDiscovery），不再写死 IP，而是动态发现服务。
+代理层：改造了 ClientProxy，让它从“直连模式”升级为“智能路由模式”。
+八股文储备：复习了 Java 并发（锁、线程状态、线程池）和 Spring 核心原理。
+2. 明日预告 (Day 5)：
+你现在的客户端虽然能查到地址，但它是傻傻地拿第一个 (get(0))。
+明天我们要实现真正的 负载均衡 (Load Balance)：
+如果有 3 个服务器，怎么轮着调用？(轮询)
+怎么随机调用？(随机)
+怎么保证同一个用户总是调同一个服务器？(一致性 Hash)
+
+
 
 
 

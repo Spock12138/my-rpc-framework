@@ -13,20 +13,31 @@ import io.netty.handler.codec.serialization.ObjectEncoder;
 import java.lang.reflect.Method;
 import java.util.HashMap;
 import java.util.Map;
+import com.github.spock12138.rpc.core.registry.ServiceRegistry;
+import com.github.spock12138.rpc.core.registry.ZkServiceRegistry;
+import java.net.InetSocketAddress;
 
 public class RpcServer {
 
     private final int port;
     // 【新增】本地注册表：存放 接口名 -> 实现类对象 的映射
     private final Map<String, Object> serviceMap = new HashMap<>();
+    private final ServiceRegistry serviceRegistry;
 
     public RpcServer(int port) {
         this.port = port;
+        // 【补上这一行】创建 Zookeeper 注册中心客户端
+        this.serviceRegistry = new ZkServiceRegistry();
     }
 
-    // 【新增】注册服务的方法
+    // 【修改】register 方法
     public void register(String serviceName, Object serviceImpl) {
+        // 1. 本地注册 (为了反射调用)
         serviceMap.put(serviceName, serviceImpl);
+
+        // 2. 【新增】远程注册 (为了让客户端发现)
+        // 这里的 host 先写死本地 127.0.0.1，后面优化
+        serviceRegistry.register(serviceName, new InetSocketAddress("127.0.0.1", port));
     }
 
     public void start() {
