@@ -35,6 +35,12 @@ public class ZkServiceRegistry implements ServiceRegistry {
             // 因为已经在构造函数里设置了 namespace("my-rpc")，所以实际路径是 /my-rpc/com.xxx...
             String servicePath = "/" + serviceName + "/" + getServiceAddress(inetSocketAddress);
 
+            // 【新增】如果节点已经存在，先删除它（防止之前非正常关闭残留）
+            if (client.checkExists().forPath(servicePath) != null) {
+                System.out.println("发现旧节点，正在删除: " + servicePath);
+                client.delete().forPath(servicePath);
+            }
+
             // 【核心】创建临时节点
             // creatingParentsIfNeeded(): 如果父节点不存在自动创建
             // withMode(CreateMode.EPHEMERAL): 临时节点，断开连接自动删除

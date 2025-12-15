@@ -433,6 +433,104 @@ new RpcClient(address) -> 再拨号。
 
 
 
+12-14:
+接下来实现负载均衡。
+1.为什么要搞负载均衡？
+今天的目标： 我们要写一个**“分配器”**，根据特定的规则（随机、轮询等），从这 3 个地址里选出一个，让大家的活儿干得均匀一点。
+
+2. 它的位置在哪里？(The Where)
+  负载均衡是夹在 “服务发现” 和 “建立连接” 中间的一层。
+  以前的流程： ServiceDiscovery (给一堆地址) --> 直接拿第一个 --> RpcClient (连接)
+  今天的流程： ServiceDiscovery (给一堆地址) --> 【LoadBalancer (选一个)】 --> RpcClient (连接)
+
+03. 接下来怎么做？(The How - 三步走)
+为了让你的 RPC 框架既灵活又专业，我们将采用策略模式 (Strategy Pattern)。
+第一步：定规矩 (Interface)
+我们不能把选择逻辑写死。我们要定义一个接口 LoadBalancer。
+输入：一堆地址列表 (List<String>)。
+输出：被选中的那个地址 (String)。
+第二步：写策略 (Implementations)
+我们会实现两个最经典的策略：
+随机 (Random)：闭着眼睛瞎指一个。实现最简单，在大量请求下其实很均匀。
+轮询 (RoundRobin)：排排坐，吃果果。第一次给 A，第二次给 B，第三次给 C，第四次又回 A。
+第三步：装进代理 (Integration)
+回到 ClientProxy 或 ZkServiceDiscovery，把原来那个丑陋的 get(0) 删掉，换成我们的 loadBalancer.select(list)。
+
+
+docker start zookeeper  --  启动 zookeeper
+
+
+
+12-15:
+启动 testServer 报错，具体信息如下 org.apache.zookeeper.KeeperException$NodeExistsException: KeeperErrorCode = NodeExists for /my-rpc/com.github.spock12138.rpc.api.HelloService/127.0.0.1:9001
+原因：Zookeeper 的“幽灵节点”。
+看你的截图，报错是 NodeExists ... 127.0.0.1:9001。
+发生了什么：
+你之前可能非正常关闭了 9001 端口的 Server（比如直接点了红方块停止，或者程序崩了）。
+虽然 Server 死了，但 Zookeeper 还没反应过来（默认有 40秒 的 Session 超时时间），它以为 Server 还活着，所以那个临时节点还在。
+当你立马再次启动 9001 时，代码试图创建同一个节点，ZK 就会喊：“报错！这个节点已经有了！”。
+
+解决方法：代码里做一个“宽容处理”
+我们需要修改 ZkServiceRegistry.java，在注册前先检查一下，或者捕获这个异常把它吞掉（因为既然节点存在，说明已经注册过了，或者需要覆盖）。
+更稳健的写法（先删后建）：
+请修改 ZkServiceRegistry.java 的 register 方法：
+
+// 【新增】如果节点已经存在，先删除它（防止之前非正常关闭残留）
+        if (client.checkExists().forPath(servicePath) != null) {
+            System.out.println("发现旧节点，正在删除: " + servicePath);
+            client.delete().forPath(servicePath);
+        }
+
+今天遇到的问题 -- JVM 进程状态隔离 和 Zookeeper 的节点残留。
+问题一：为什么轮询失效（总是连 9000）？
+原因：你“重置”了计数器。
+你的代码逻辑：RoundRobinLoadBalancer 里有一个 AtomicInteger index = 0。
+你的操作：每次点 IDEA 的“运行”按钮，都是启动一个新的 Java 进程（JVM）。
+后果：
+第一次运行 TestClient：新 JVM -> 新 LoadBalancer -> index 初始化为 0 -> 选第 0 个 (9000)。程序结束，内存清空。
+第二次运行 TestClient：又是新 JVM -> 又是新 LoadBalancer -> index 还是初始化为 0 -> 选第 0 个 (9000)。
+结论：因为你每次都重启了客户端，计数器根本没机会加到 1。
+✅ 解决方法：在一次运行中循环调用
+请修改 TestClient.java，让它在一个 main 方法里连续调用 5 次。这样计数器才能累加。
+
+
+1. 为什么“重启”也能解决报错？(原理分析)
+你提到：“关闭报错的节点，然后重启，第二次就不存在错误了”。
+这其实验证了 Zookeeper “临时节点 (Ephemeral Node)” 的核心特性：
+生命周期绑定会话：当你的 Java 程序（Server 9001）非正常退出时，Zookeeper Server 不会立刻知道（它以为网络卡顿了）。
+超时机制：过了几十秒（Session Timeout），Zookeeper 发现：“哎，这个 9001 怎么还不给我发心跳？肯定挂了。” 于是它自动删除了那个节点。
+结果：等你下次启动时，节点已经被删了，所以不报错了。
+那为什么我们要加代码修复？ 因为在生产环境或者高频调试时，我们往往需要在服务挂掉后的 1秒内 立刻重启。这时候 Zookeeper 还没来得及删旧节点，新服务就会启动失败。你后来加的 checkExists 代码，就是为了应对这种**“极速重启”**的场景。
+
+2. 这个阶段的里程碑意义
+看着这张截图，你现在拥有的已经是一个真正意义上的微服务架构雏形：
+多实例部署：你同时跑了两个 Server。
+服务注册与发现：Zookeeper 自动维护了这份名单。
+客户端负载均衡：Client 端自己决定把流量打给谁，而且做到了雨露均沾。
+
+
+今天的任务总结：
+不仅仅是“实现了轮询”，更重要的是你引入了**“策略模式”**，搭建了一个可扩展的架构。你对 Java 语法的那个困惑点，其实正是 Java 面向对象最核心的概念——多态 (Polymorphism)。
+第一部分：解惑 Java 语法 —— “多态”与“向上转型”
+你的困惑在于：为什么左边声明的是 LoadBalancer（接口），右边 new 的却是 RandomLoadBalancer 或 RoundRobinLoadBalancer（实现类）？
+这在 Java 里叫做 “向上转型” (Upcasting)，或者更通俗地说，是 “父类引用指向子类对象”。
+1. 通俗比喻：USB 接口
+LoadBalancer (接口)：就像电脑上的 USB 插口。标准规定：只要插进来的东西，必须能“传输数据”（对应 select 方法）。
+RandomLoadBalancer (实现类)：就像 鼠标。它是 USB 设备的一种。
+RoundRobinLoadBalancer (实现类)：就像 键盘。它也是 USB 设备的一种。
+语法逻辑： 电脑（ZkServiceDiscovery）说：“我需要一个 USB 设备（LoadBalancer）。” 你可以给它插个鼠标（new Random...），也可以插个键盘（new RoundRobin...）。 电脑不在乎具体插的是啥，它只知道“这个东西肯定能传输数据（能调用 select）”。
+2. 代码层面的好处
+如果不这么写，你的代码就死了：
+面向接口编程
+
+
+
+
+
+
+
+
+
 
 
 

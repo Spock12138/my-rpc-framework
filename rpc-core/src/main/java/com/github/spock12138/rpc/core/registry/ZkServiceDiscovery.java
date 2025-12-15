@@ -8,9 +8,14 @@ import org.apache.curator.retry.ExponentialBackoffRetry;
 import java.net.InetSocketAddress;
 import java.util.List;
 
+import com.github.spock12138.rpc.core.loadbalancer.LoadBalancer;
+import com.github.spock12138.rpc.core.loadbalancer.RandomLoadBalancer;
+import com.github.spock12138.rpc.core.loadbalancer.RoundRobinLoadBalancer;
+
 public class ZkServiceDiscovery implements ServiceDiscovery {
 
     private final CuratorFramework client;
+    private final LoadBalancer loadBalancer; // 新增
 
     public ZkServiceDiscovery() {
         // 1. 连接 ZK (和 Server 端一模一样的代码，实际开发中可以抽取成工具类)
@@ -22,31 +27,33 @@ public class ZkServiceDiscovery implements ServiceDiscovery {
                 .namespace("my-rpc")
                 .build();
         this.client.start();
+//        // 【新增】初始化负载均衡器
+//        this.loadBalancer = new RandomLoadBalancer();
+        // 【修改】将 RandomLoadBalancer 替换为 RoundRobinLoadBalancer
+        this.loadBalancer = new RoundRobinLoadBalancer();
     }
 
     @Override
     public InetSocketAddress lookupService(String serviceName) {
         try {
-            // 1. 获取该服务下所有的子节点 (也就是所有可用的地址列表)
-            // 路径: /my-rpc/com.xxx.HelloService
+            // 1. 获取列表 (代码不变)
             String servicePath = "/" + serviceName;
             List<String> serviceAddresses = client.getChildren().forPath(servicePath);
 
-            // 2. 判空 (如果列表是空的，说明没人提供这个服务)
             if (serviceAddresses == null || serviceAddresses.isEmpty()) {
                 throw new RuntimeException("找不到服务: " + serviceName);
             }
 
-            // 3. 负载均衡 (今天先简单粗暴：直接取第一个)
-            // 明天我们会在这里把 get(0) 换成 LoadBalancer.select(list)
-            String address = serviceAddresses.get(0);
+            // 2. 【核心修改】负载均衡选择
+            // 以前：String address = serviceAddresses.get(0);
+            // 现在：
+            String address = loadBalancer.select(serviceAddresses);
 
-            // 4. 解析字符串 "127.0.0.1:9000" -> host 和 port
+            System.out.println("负载均衡选择了: " + address); // 打印一下方便观察
+
+            // 3. 解析地址 (代码不变)
             String[] parts = address.split(":");
-            String host = parts[0];
-            int port = Integer.parseInt(parts[1]);
-
-            return new InetSocketAddress(host, port);
+            return new InetSocketAddress(parts[0], Integer.parseInt(parts[1]));
 
         } catch (Exception e) {
             e.printStackTrace();
