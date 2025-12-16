@@ -17,6 +17,14 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutionException;
 
+// 序列化相关
+import com.github.spock12138.rpc.core.serializer.Serializer;
+import com.github.spock12138.rpc.core.serializer.KryoSerializer;
+
+// 编解码相关
+import com.github.spock12138.rpc.core.codec.CommonEncoder;
+import com.github.spock12138.rpc.core.codec.CommonDecoder;
+
 public class RpcClient {
 
     private final String host;
@@ -49,8 +57,14 @@ public class RpcClient {
                         @Override
                         protected void initChannel(SocketChannel ch) {
                             ChannelPipeline pipeline = ch.pipeline();
-                            pipeline.addLast(new ObjectDecoder(ClassResolvers.cacheDisabled(null)));
-                            pipeline.addLast(new ObjectEncoder());
+                            // 1. 创建序列化器 (Kryo)
+                            Serializer serializer = new KryoSerializer();
+
+                            // 2. 添加自定义编码器 (负责把 RpcResponse 变成 ByteBuf)
+                            pipeline.addLast(new CommonEncoder(serializer));
+
+                            // 3. 添加自定义解码器 (负责把 ByteBuf 变成 RpcRequest)
+                            pipeline.addLast(new CommonDecoder());
 
                             // 业务 Handler
                             pipeline.addLast(new SimpleChannelInboundHandler<RpcResponse>() {
