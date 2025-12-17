@@ -11,6 +11,13 @@ public class ZkServiceRegistry implements ServiceRegistry {
 
     private final CuratorFramework client;
 
+    // 【新增】带参数的构造函数
+    public ZkServiceRegistry(String registryAddress) {
+        // 使用传入的地址创建客户端
+        this.client = CuratorFrameworkFactory.newClient(registryAddress, new ExponentialBackoffRetry(1000, 3));
+        this.client.start();
+    }
+
     public ZkServiceRegistry() {
         // 1. 重试策略：指数退避策略 (每隔 1s 重试一次，最多 3 次)
         RetryPolicy retryPolicy = new ExponentialBackoffRetry(1000, 3);

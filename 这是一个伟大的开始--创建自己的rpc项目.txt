@@ -620,6 +620,104 @@ Reset: 你不能拿走这 3 个鸡腿，必须退回到起点（resetReaderIndex
 
 
 
+12-17:
+昨天的任务总结
+知识复盘：自定义序列化与协议
+如果面试官问：“你的 RPC 框架在传输层做了哪些优化？”，你可以这么回答（这就是今天的精华）：
+
+1. 抛弃 JDK 原生序列化，引入 Kryo
+痛点：JDK 序列化太笨重（带了很多类元数据）、速度慢、且无法跨语言。
+优化：使用了 Kryo。它专注于 Java 对象的高性能序列化，体积小（只有 JDK 的 1/10 左右），速度快。
+难点：Kryo 是线程不安全的。解决办法是使用 ThreadLocal<Kryo>，给每个线程分配一个独立的 Kryo 实例，互不干扰。
+2. 解决 TCP“粘包/半包”问题
+痛点：TCP 是流式协议，没有边界。连续发送数据时，接收方可能一次收到两个包（粘包）或者半个包（半包）。
+优化：设计了 自定义应用层协议 (Protocol)。
+魔数 (Magic Number)：0xCAFEBABE，用于第一时间校验数据包是不是我们要的，防止乱连。
+长度字段 (Length)：这是解决粘包的核心。接收方先读长度，不够就等，够了再截取，确保拿到的是完整数据。
+实现：利用 Netty 的 CommonDecoder 里的“回退机制” (markReaderIndex / resetReaderIndex)，数据不够时回退指针，等待下一次读取。
+
+
+今天的计划，实现 spring 注解支持
+理由如下：
+“用户体验”的质变：
+现在：你要写 server.register(...)，还要写 proxy.getProxy(...)。这就好比用 JDBC 写 SQL，太原始了。
+明天过后：你只需要在字段上加一个 @RpcReference，或者在类上加一个 @RpcService，Spring 启动时自动帮你搞定一切。这才是现代框架（如 Dubbo, Feign）的样子。
+面试的高频考点：
+面试官非常喜欢问：“你是怎么把你的 RPC 整合到 Spring 容器里的？”
+这会涉及到 Spring Bean 生命周期、BeanPostProcessor (后置处理器)、自定义注解 等高阶 Java 知识。这比心跳检测更能体现你对 Java 生态的掌控力。
+心跳检测的优先级：
+心跳检测是为了解决“长时间空闲连接断开”的问题。在目前的测试环境下（你刚才的 9000/9001 端口测试），并不影响核心功能演示。我们可以把它放在 Day 7 (收尾/扩展) 来做。
+
+
+今天的任务清单
+任务清单 (Day 6 - Spring 集成)
+明天我们将变身为“Spring 魔法师”，主要任务：
+自定义注解：写两个注解 @RpcService (服务端用) 和 @RpcReference (客户端用)。
+Spring 启动扫描：
+服务端启动时，自动扫描带有 @RpcService 的类，注册到 Zookeeper。
+客户端启动时，自动扫描带有 @RpcReference 的字段，自动生成代理对象并注入进去。
+告别手动代码：以后测试再也不用写 new RpcServer 这种硬代码了。
+这将是你的 RPC 框架从“硬核工具”变成“好用框架”的关键一步。
+
+
+我们写代码的顺序大概是：
+造便利贴：创建 @RpcService 和 @RpcReference 注解文件。
+聘请质检员：创建一个类实现 BeanPostProcessor 接口。
+写说明书：在 postProcessAfterInitialization 方法里，写上面的“判断逻辑”和“偷梁换柱逻辑”。
+启动：在 Spring 的配置类里加个 @ComponentScan，完事！
+🧠 预习总结
+核心原理：IOC (控制反转) 和 AOP (面向切面) 的结合体。
+关键接口：BeanPostProcessor。
+一句话解释：利用 Spring 的生命周期钩子，在 Bean 初始化之后，扫描注解，完成“注册服务”和“注入代理”的工作。
+
+3. 幕后黑手：BeanPostProcessor (BPP)
+这是 Spring 面试的必考题，也是今天代码的核心。
+想象 Spring 容器是一个“手机工厂”：
+实例化：工厂把手机零件组装好（new Object）。
+初始化：给手机装系统（属性赋值）。
+BeanPostProcessor (质检员)：关键就在这里！
+Spring 允许我们在手机出厂前最后一步，安排一个“质检员”把手机拿过来检查一遍，甚至偷偷改装一下。
+我们的 RPC 逻辑就在这个“质检员”里实现：
+场景 A：服务端启动 (自动注册)
+Spring 每生产出一个 Bean（对象），就把它交给我们的 RpcBeanPostProcessor。
+逻辑：
+检查：这个 Bean 头上有没有贴 @RpcService 便利贴？
+如果有：拿到它的 IP、端口、接口名，直接调用 ServiceRegistry 注册到 ZooKeeper。
+放行：把 Bean 还给 Spring。
+场景 B：客户端启动 (自动注入)
+Spring 生产出一个 UserController。
+RpcBeanPostProcessor 拿到这个 Controller。
+逻辑：
+扫描：检查这个类里面所有的字段（Field），看谁贴了 @RpcReference。
+发现：HelloService helloService 字段贴了。
+偷梁换柱 (核心)：
+调用我们之前写好的 ClientProxy.getProxy()，动态生成一个代理对象。
+利用 Java 反射 (field.set(...))，强行把这个代理对象塞到字段里。
+放行：Spring 拿到的 Controller 已经是一个“自带 RPC 功能”的增强版对象了。
+
+1.修改 pom.xml 引入 Spring。创建好这两个注解文件。
+2.编写“质检员” (BeanPostProcessor)
+  既然便利贴做好了，现在我们要聘请一位“质检员”。 他的工作流程是：Spring 每生产好一个 Bean，都要经过他的手。他会检查这个 Bean 有没有贴我们的便利贴。
+
+
+遇到 new RpcServer(9000, serviceMap).start(); 这里报错，需要两个参数，但是构造函数只有一个参数，解决方法，再加一个构造函数。
+Spring 启动 -> 扫描注解 -> 放入 Map -> 传给 RpcServer -> RpcServer 启动 Netty。
+此时，Netty 收到请求后，去 serviceMap.get(...) 就能立刻找到 Spring 管理的那个 HelloServiceImpl 对象了。
+
+
+你的 RPC 服务端已经成功启动了！
+从截图 来看，最底下的 RPC 服务端启动成功，监听端口：9000 就像是胜利的号角。这意味着：
+Spring 容器 成功启动了。
+注解扫描 生效了（找到了你的 HelloServiceImpl）。
+桥梁搭建成功（服务列表成功传递给了 Netty）。
+Netty 正常在 9000 端口等待连接。
+现在，只差最后一块拼图：客户端（Client）。 只要客户端能通过 @RpcReference 自动注入并调用成功，你的“Spring 插件化”改造就完美通关了。
+
+
+
+
+
+
 
 
 

@@ -38,6 +38,23 @@ public class RpcServer {
         this.serviceRegistry = new ZkServiceRegistry();
     }
 
+    // 2. 【新增】支持传入 serviceMap 的构造函数
+    public RpcServer(int port, Map<String, Object> serviceMap) {
+        this.port = port;
+        this.serviceRegistry = new ZkServiceRegistry();
+        // 【修改前】：this.serviceMap.putAll(serviceMap);
+
+        // 【修改后】：遍历 Map，一个个去注册！
+        for (Map.Entry<String, Object> entry : serviceMap.entrySet()) {
+            String serviceName = entry.getKey();
+            Object serviceImpl = entry.getValue();
+
+            // 调用下面现成的 register 方法
+            // 这样既放入了本地 Map，又注册到了 Zookeeper
+            register(serviceName, serviceImpl);
+        }
+    }
+
     // 【修改】register 方法
     public void register(String serviceName, Object serviceImpl) {
         // 1. 本地注册 (为了反射调用)
